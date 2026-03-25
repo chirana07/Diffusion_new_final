@@ -1,0 +1,6 @@
+Inference on eval15
+PSNR: 18.4579
+SSIM: 0.8377
+Runtime per image: 1.4425s
+Entropy: 6.7889
+Sharpness: 0.009609
