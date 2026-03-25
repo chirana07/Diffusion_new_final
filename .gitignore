@@ -28,7 +28,6 @@ ENV/
 Thumbs.db
 
 # Large files
-*.pth
 *.pt
 *.pkl
 *.zip
