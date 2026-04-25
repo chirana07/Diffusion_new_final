@@ -50,13 +50,30 @@ def main():
     parser.add_argument("--results-root", default="./eval_results/step_ablation")
     parser.add_argument("--out-csv", default="./eval_results/step_ablation/combined.csv")
     parser.add_argument("--plot", action="store_true")
+    parser.add_argument("--no-lpips", action="store_true")
     args = parser.parse_args()
 
     all_rows = []
     for sampler in args.samplers:
         for steps in args.steps:
             tag = f"{sampler}_s{steps}"
-            run_eval(args.splits, args.checkpoint, steps, sampler, args.results_root, tag)
+            # build command
+            cmd = [
+                sys.executable, "evaluation.py",
+                "--splits", *args.splits,
+                "--inference-steps", str(steps),
+                "--sampler", sampler,
+                "--results-root", args.results_root,
+                "--tag", tag,
+            ]
+            if args.checkpoint:
+                cmd += ["--checkpoint", args.checkpoint]
+            if args.no_lpips:
+                cmd += ["--no-lpips"]
+            
+            print("$ " + " ".join(cmd))
+            subprocess.run(cmd, check=True)
+            
             for row in collect_summary(args.results_root, tag):
                 row["sampler_override"] = sampler
                 row["steps_override"] = steps

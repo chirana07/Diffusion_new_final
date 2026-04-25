@@ -134,10 +134,16 @@ def evaluate_split(
     for name in tqdm(names):
         low_path = os.path.join(low_dir, name)
         high_path = os.path.join(high_dir, name)
+        
         if not os.path.exists(high_path):
-            # some datasets use Normal/ instead of high/; try a fallback
-            high_path = os.path.join(high_dir, name)
+            # Fallback 1: try replacing 'low' with 'normal' (LOL-v2 Real)
+            if name.startswith("low"):
+                fallback_name = name.replace("low", "normal", 1)
+                high_path = os.path.join(high_dir, fallback_name)
+            
             if not os.path.exists(high_path):
+                # Fallback 2: try case-insensitive or other common patterns if needed
+                # For now, just skip if still not found
                 continue
 
         low_pil = Image.open(low_path).convert("RGB")

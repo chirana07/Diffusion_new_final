@@ -1,6 +1,10 @@
-Inference on eval15
-PSNR: 18.4579
-SSIM: 0.8377
-Runtime per image: 1.4425s
-Entropy: 6.7889
-Sharpness: 0.009609
+[eval15] n=15 steps=100 sampler=ddim
+  PSNR:  18.4879 (std 3.4122)
+  SSIM:  0.7537 (std 0.0749)
+  Runtime/image: 37.4762s
+
+[lolv2_real] n=100 steps=100 sampler=ddim
+  PSNR:  22.6211 (std 3.7833)
+  SSIM:  0.7900 (std 0.0687)
+  Runtime/image: 33.0117s
+
