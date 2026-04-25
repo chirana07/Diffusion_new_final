@@ -32,10 +32,11 @@ def main():
     device = conf.DEVICE
     print(f"Using device: {device}")
 
-    model = ResidualConditionedUNet().to(device)
-    diff = DiffusionEngine()
-
     checkpoint = torch.load(checkpoint_path, map_location=device)
+    use_prior = bool(checkpoint.get("use_illum_prior", False)) if isinstance(checkpoint, dict) else False
+
+    model = ResidualConditionedUNet(use_illum_prior=use_prior).to(device)
+    diff = DiffusionEngine()
 
     if "ema" in checkpoint:
         print("Loading EMA weights...")

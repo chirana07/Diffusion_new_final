@@ -165,6 +165,40 @@ class ResBlockSFT(nn.Module):
         return h + self.shortcut(x)
 
 
+class IlluminationPrior(nn.Module):
+    """
+    Retinex-style illumination estimate.
+
+    L(y_low) = GaussianBlur( max_c y_low[c] )
+
+    Operates on images normalized to [-1, 1]. Returns a single-channel map in [-1, 1].
+    No learnable parameters — kept as an nn.Module so it moves with .to(device) naturally.
+    This is the "illumination prior" used as extra conditioning for LuminaDiff-R.
+    """
+
+    def __init__(self, kernel_size=15, sigma=3.0):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.sigma = sigma
+
+        # Precompute 2D Gaussian kernel
+        half = kernel_size // 2
+        coords = torch.arange(kernel_size, dtype=torch.float32) - half
+        g1d = torch.exp(-(coords ** 2) / (2.0 * sigma ** 2))
+        g1d = g1d / g1d.sum()
+        g2d = g1d[:, None] @ g1d[None, :]
+        kernel = g2d.unsqueeze(0).unsqueeze(0)  # (1, 1, K, K)
+        self.register_buffer("kernel", kernel)
+
+    def forward(self, x):
+        # x: (B, 3, H, W) in [-1, 1] -> illum: (B, 1, H, W) in [-1, 1]
+        x01 = (x + 1.0) / 2.0
+        illum01 = x01.max(dim=1, keepdim=True).values
+        pad = self.kernel_size // 2
+        illum01 = F.conv2d(illum01, self.kernel, padding=pad)
+        return illum01 * 2.0 - 1.0
+
+
 class ConditionEncoder(nn.Module):
     def __init__(self, in_ch=3, base_ch=32, ch_mult=(1, 2, 4, 8)):
         super().__init__()
