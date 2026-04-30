@@ -1,0 +1,4 @@
+device,resolution,sampler,steps,latency_ms,throughput_imgs_per_s,peak_gpu_mb,total_flops_g,params_m
+cuda,400x600,ddim,5,811.81,1.232,1051.8,1005.8,17.973
+cuda,400x600,ddim,10,1685.55,0.593,1052.2,2011.59,17.973
+cuda,400x600,ddim,20,3297.66,0.303,1052.2,4023.18,17.973

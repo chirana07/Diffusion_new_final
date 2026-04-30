@@ -117,6 +117,8 @@ def evaluate_split(
     sampler,
     device,
     lpips_fn=None,
+    gate_alpha=0.0,
+    gate_floor=0.5,
 ):
     os.makedirs(results_dir, exist_ok=True)
 
@@ -156,7 +158,10 @@ def evaluate_split(
         start = time.time()
         with torch.no_grad():
             if sampler == "ddim":
-                gen_tensor = diff.ddim_sample(model, low_tensor, inference_steps=inference_steps)
+                gen_tensor = diff.ddim_sample(
+                    model, low_tensor, inference_steps=inference_steps,
+                    gate_alpha=gate_alpha, gate_floor=gate_floor,
+                )
             elif sampler == "dpm_posterior":
                 gen_tensor = diff.sample(model, low_tensor, inference_steps=inference_steps)
             else:
@@ -232,6 +237,15 @@ def main():
     )
     parser.add_argument("--no-lpips", action="store_true", help="Skip LPIPS even if installed")
     parser.add_argument("--tag", default="", help="Optional tag appended to the output dir name")
+    parser.add_argument(
+        "--gate-alpha", type=float, default=0.0,
+        help="Adaptive Residual Rescaling strength. 0 = vanilla DDIM (unchanged); "
+             "values in [0, 1] dampen residual at high noise levels. Tune on val.",
+    )
+    parser.add_argument(
+        "--gate-floor", type=float, default=0.5,
+        help="Floor on the ARR factor (prevents zeroing the residual at noisy steps).",
+    )
     args = parser.parse_args()
 
     conf = Config()
@@ -296,6 +310,8 @@ def main():
             sampler=args.sampler,
             device=device,
             lpips_fn=lpips_fn,
+            gate_alpha=args.gate_alpha,
+            gate_floor=args.gate_floor,
         )
         if result is None:
             continue

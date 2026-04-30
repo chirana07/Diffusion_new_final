@@ -110,8 +110,11 @@ def train(args):
     print(f"Config: crop={conf.CROP_SIZE}, batch={conf.BATCH_SIZE}, epochs={conf.EPOCHS}, "
           f"illum_prior={conf.USE_ILLUM_PRIOR}, layout={args.layout}")
 
-    train_ds = LOLDataset(mode="train", layout=args.layout, crop_size=conf.CROP_SIZE, augment=True)
-    val_ds = LOLDataset(mode="test", layout=args.layout, augment=False)
+    train_ds = LOLDataset(mode="train", layout=args.layout,
+                          root=args.dataset_root,
+                          crop_size=conf.CROP_SIZE, augment=True)
+    val_ds = LOLDataset(mode="test", layout=args.layout,
+                        root=args.dataset_root, augment=False)
 
     train_loader = DataLoader(
         train_ds, batch_size=conf.BATCH_SIZE, shuffle=True,
@@ -243,6 +246,10 @@ def parse():
     p = argparse.ArgumentParser()
     p.add_argument("--layout", default=os.environ.get("DATASET_LAYOUT", "lol_v1"),
                    help="Dataset layout: lol_v1 | lolv2_real | lolv2_syn | flat")
+    p.add_argument("--dataset-root", default=None,
+                   help="Path to the directory that CONTAINS the layout's relative paths "
+                        "(e.g. for lolv2_real: the dir containing 'Real_captured/'). "
+                        "Defaults to Config.DATASET_ROOT with glob fallback.")
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--batch-size", type=int, default=None)
     p.add_argument("--crop-size", type=int, default=None)

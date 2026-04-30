@@ -11,6 +11,24 @@ Changes vs. prior version (2026-04-24):
   "legacy" sampler in the ablation.
 - q_sample now also returns the exact (s1, s2) coefficients used, so the training
   code can do an x0-parameterized MSE cross-check if needed.
+
+Changes (2026-04-30, novelty for resubmission):
+- ddim_sample now supports `gate_alpha` and `gate_floor` parameters that implement
+  ADAPTIVE RESIDUAL RESCALING (ARR): an inference-time, training-free modulation
+  that dampens the residual prediction at high noise levels and trusts it fully
+  at clean levels. Mirrors the fact that the model's residual prediction is more
+  uncertain when the input residual is closer to pure noise.
+
+  factor(t) = max(gate_floor, 1 - gate_alpha * (t / (T-1)))
+  x0_pred_modulated = x0_pred * factor
+
+  - gate_alpha = 0 (default) reproduces the original DDIM behavior exactly,
+    so existing checkpoints and prior results are unaffected.
+  - gate_alpha > 0 enables ARR; tune on a small held-out subset.
+  - gate_floor caps the minimum scaling so the residual is never zeroed out.
+
+  This is the small, citable architectural variation we add for the resubmission
+  (no retraining required).
 """
 import math
 
@@ -115,7 +133,8 @@ class DiffusionEngine:
         return final_img
 
     @torch.no_grad()
-    def ddim_sample(self, model, low_light, inference_steps=None, eta=0.0):
+    def ddim_sample(self, model, low_light, inference_steps=None, eta=0.0,
+                    gate_alpha=0.0, gate_floor=0.5):
         """
         Proper DDIM sampler operating in residual space (x0-parameterization).
 
@@ -129,6 +148,16 @@ class DiffusionEngine:
         eta=1 recovers stochastic DDPM ancestral sampling.
 
         The model emits a clean residual prediction; we treat it as x0 for DDIM.
+
+        Adaptive Residual Rescaling (ARR):
+          When `gate_alpha > 0`, the predicted residual x0_pred is multiplied by
+              factor(t) = max(gate_floor, 1 - gate_alpha * t / (T - 1))
+          before being plugged back into the DDIM update. At t=0 (clean step)
+          factor=1, so the final-step residual is unaffected. At t=T-1 (noisiest)
+          factor reaches its minimum (clamped at gate_floor). This is an
+          inference-time-only modulation; the trained model is unchanged.
+
+          Set gate_alpha=0 (default) to reproduce vanilla DDIM behavior exactly.
         """
         model.eval()
         b = low_light.shape[0]
@@ -137,11 +166,20 @@ class DiffusionEngine:
         schedule = self._build_schedule(inference_steps)
         idx_list = schedule.tolist()
 
+        T_minus_1 = max(self.steps - 1, 1)
+
         for step_i, i in enumerate(idx_list):
             t = torch.full((b,), int(i), device=self.device, dtype=torch.long)
 
             _pred_img, x0_pred = model(residual, t, low_light, return_residual=True)
             x0_pred = torch.clamp(x0_pred, -1.0, 1.0)
+
+            # --- Adaptive Residual Rescaling (ARR) ---
+            if gate_alpha > 0.0:
+                # t is identical across the batch in DDIM; safe to take a scalar.
+                t_norm = float(int(i)) / T_minus_1
+                factor = max(float(gate_floor), 1.0 - gate_alpha * t_norm)
+                x0_pred = x0_pred * factor
 
             a_t = self.alphas_cumprod[t][:, None, None, None]
             # index of "t-1" in the strided schedule
