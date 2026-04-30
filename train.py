@@ -64,6 +64,74 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+def smart_load_checkpoint(model, ckpt_path, device, prefer="ema"):
+    """Load weights from a checkpoint into `model`, tolerating shape mismatches.
+
+    Use case: the Day 1 checkpoint was trained with `use_illum_prior=False`, which
+    means `head.weight` has shape (32, 6, 3, 3). When we fine-tune with
+    `use_illum_prior=True`, `head.weight` is (32, 7, 3, 3). We want to copy the
+    first 6 input channels and zero-init the 7th so the network's behavior at
+    iteration 0 of fine-tuning is identical to the original (because the
+    illumination-prior conv weights start at zero and only learn to contribute
+    non-zero gradients during fine-tuning).
+
+    Returns (n_loaded, n_skipped, n_partial) for logging.
+    """
+    import torch as _torch
+
+    raw = _torch.load(ckpt_path, map_location=device)
+    if isinstance(raw, dict):
+        if prefer == "ema" and "ema" in raw:
+            src_state = raw["ema"]
+            print(f"[smart_load] loading from 'ema' key in {ckpt_path}")
+        elif "model" in raw:
+            src_state = raw["model"]
+            print(f"[smart_load] loading from 'model' key in {ckpt_path}")
+        else:
+            src_state = raw
+            print(f"[smart_load] loading raw state dict from {ckpt_path}")
+    else:
+        src_state = raw
+        print(f"[smart_load] loading raw tensor blob from {ckpt_path}")
+
+    dst_state = model.state_dict()
+    n_loaded, n_skipped, n_partial = 0, 0, 0
+
+    for name, dst_tensor in dst_state.items():
+        if name not in src_state:
+            n_skipped += 1
+            continue
+        src_tensor = src_state[name]
+        if src_tensor.shape == dst_tensor.shape:
+            dst_state[name] = src_tensor.to(dst_tensor.device).to(dst_tensor.dtype)
+            n_loaded += 1
+        else:
+            # Try a partial copy: handle the head.weight (32, 6 or 7, 3, 3) case
+            # where input channels grew. Slice along axis 1.
+            if (
+                len(src_tensor.shape) == len(dst_tensor.shape)
+                and src_tensor.shape[0] == dst_tensor.shape[0]
+                and src_tensor.shape[2:] == dst_tensor.shape[2:]
+                and src_tensor.shape[1] < dst_tensor.shape[1]
+            ):
+                merged = dst_tensor.clone()
+                # zero-init then copy first src.shape[1] input channels
+                merged.zero_()
+                merged[:, : src_tensor.shape[1]] = src_tensor.to(dst_tensor.device).to(dst_tensor.dtype)
+                dst_state[name] = merged
+                n_partial += 1
+                print(f"[smart_load] partial-copy {name}: {tuple(src_tensor.shape)} -> "
+                      f"{tuple(dst_tensor.shape)} (zero-init {dst_tensor.shape[1] - src_tensor.shape[1]} new in-channels)")
+            else:
+                n_skipped += 1
+                print(f"[smart_load] SKIP {name}: src {tuple(src_tensor.shape)} vs dst {tuple(dst_tensor.shape)}")
+
+    model.load_state_dict(dst_state)
+    print(f"[smart_load] loaded={n_loaded}  partial={n_partial}  skipped={n_skipped}  "
+          f"(of {len(dst_state)} dst tensors)")
+    return n_loaded, n_skipped, n_partial
+
+
 # --------------------------- validation ---------------------------
 
 @torch.no_grad()
@@ -125,11 +193,23 @@ def train(args):
 
     model = ResidualConditionedUNet(use_illum_prior=conf.USE_ILLUM_PRIOR).to(conf.DEVICE)
     diff = DiffusionEngine()
+
+    # Optional fine-tuning init: load weights from an existing checkpoint, tolerating
+    # head-conv shape changes when use_illum_prior flips True.
+    if args.init_from:
+        if not os.path.exists(args.init_from):
+            raise FileNotFoundError(f"--init-from path does not exist: {args.init_from}")
+        smart_load_checkpoint(model, args.init_from, conf.DEVICE,
+                              prefer="ema" if not args.init_from_model_key else "model")
+        print(f"Fine-tuning from: {args.init_from}")
     ema = EMA(model)
+
+    # Allow LR override (essential for fine-tuning at lower LR)
+    lr_start = float(args.lr) if args.lr is not None else conf.LR_START
 
     optimizer = optim.AdamW(
         model.parameters(),
-        lr=conf.LR_START,
+        lr=lr_start,
         betas=conf.BETAS,
         weight_decay=conf.WEIGHT_DECAY,
     )
@@ -259,6 +339,13 @@ def parse():
     p.add_argument("--tag", default=os.environ.get("RUN_TAG", "default"))
     p.add_argument("--val-max-batches", type=int, default=None,
                    help="Limit validation to N batches (for quick smoke tests)")
+    p.add_argument("--init-from", default=None,
+                   help="Path to a .pth checkpoint to initialize weights from (fine-tuning). "
+                        "Tolerates head-conv input-channel growth when --use-illum-prior 1.")
+    p.add_argument("--init-from-model-key", action="store_true",
+                   help="Load from 'model' key instead of 'ema' key in the source checkpoint.")
+    p.add_argument("--lr", type=float, default=None,
+                   help="Override Config.LR_START (e.g. 1e-5 for fine-tuning).")
     # Loss weights — used by the loss-component ablation
     p.add_argument("--w-char", type=float, default=1.0)
     p.add_argument("--w-ssim", type=float, default=0.5)
