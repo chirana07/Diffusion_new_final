@@ -128,19 +128,31 @@ class LOLDataset(Dataset):
 
         self.low_dir, self.high_dir = found
         exts = (".png", ".jpg", ".jpeg", ".bmp")
-        self.names = sorted(
-            n for n in os.listdir(self.low_dir)
-            if n.lower().endswith(exts) and os.path.exists(os.path.join(self.high_dir, n))
-        )
-        if not self.names:
+        self.pairs = []
+        high_files = set(os.listdir(self.high_dir))
+        for n in sorted(os.listdir(self.low_dir)):
+            if not n.lower().endswith(exts):
+                continue
+            if n in high_files:
+                self.pairs.append((n, n))
+            else:
+                # Try to match Kaggle renamed files like low00001.png -> normal00001.png
+                n_normal = n.replace("low", "normal").replace("Low", "Normal")
+                n_high = n.replace("low", "high").replace("Low", "High")
+                if n_normal in high_files:
+                    self.pairs.append((n, n_normal))
+                elif n_high in high_files:
+                    self.pairs.append((n, n_high))
+
+        if not self.pairs:
             raise RuntimeError(
                 f"No paired images under {self.low_dir} <-> {self.high_dir}"
             )
-        print(f"[LOLDataset] layout={self.layout_name} mode={mode} n={len(self.names)} "
+        print(f"[LOLDataset] layout={self.layout_name} mode={mode} n={len(self.pairs)} "
               f"low={self.low_dir} high={self.high_dir}")
 
     def __len__(self):
-        return len(self.names)
+        return len(self.pairs)
 
     def _pad_to_multiple(self, pil_low, pil_high):
         w, h = pil_low.size
@@ -152,9 +164,9 @@ class LOLDataset(Dataset):
         return pil_low, pil_high
 
     def __getitem__(self, idx):
-        name = self.names[idx]
-        low = Image.open(os.path.join(self.low_dir, name)).convert("RGB")
-        high = Image.open(os.path.join(self.high_dir, name)).convert("RGB")
+        low_name, high_name = self.pairs[idx]
+        low = Image.open(os.path.join(self.low_dir, low_name)).convert("RGB")
+        high = Image.open(os.path.join(self.high_dir, high_name)).convert("RGB")
 
         if self.mode == "train":
             # Random crop at CROP_SIZE
