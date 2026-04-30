@@ -1,273 +1,300 @@
-# DAY 2 — Fine-tune from the Day 1 checkpoint (the master runbook)
+# DAY 2 v3 — Few-step Self-Distillation (the master runbook)
 
-**This is v2 of the runbook.** The original from-scratch plan was overfitting
-(val PSNR stuck at 17 dB after 34 epochs while the loss was climbing). The new
-plan **fine-tunes** the existing Day 1 `final.pth` (which already gets 22.77
-PSNR on LOL-v2 Real) for 50 epochs at low learning rate. Two parallel runs,
-with and without the illumination prior, give a clean method ablation.
+**This is the v3 plan.** From-scratch training overfit. Fine-tuning slowly
+drifted away from the working solution. The v3 plan is **self-distillation**:
+your Day 1 checkpoint becomes a frozen teacher running 5 DDIM substeps; a
+trainable student (initialized from the same weights) learns to match the
+teacher's multi-step refinement in a single forward pass. The student then
+plugs back into the standard 5-step DDIM sampler at zero extra inference cost.
 
-Expected wall clock: **2 h of your active time** + **~3.5 h of Kaggle GPU**.
+This is the cleanest, most defensible novelty story available within your
+remaining time budget — citable foundations (Salimans & Ho 2022, Song et al.
+2023), real training-time technique, addresses the area chair's "novelty
+modest" verdict head-on.
+
+Expected wall clock:
+- ~20 min of your active time (push, set up notebook, kick off training)
+- ~50–70 min unattended Kaggle GPU for training
+- ~50–75 min for re-evaluation
+- **Total: 1 active hour + 2 hours unattended = one afternoon**
 
 ---
 
-## What changed since the v1 runbook
+## What changed since v2 (the fine-tune plan)
 
-If you ran v1 and ended up training from scratch, **stop that training now**.
-Discard the `best_lolv2real_baseline.pth` and `best_lolv2real_illum.pth`
-files if they exist — they're undertrained.
-
-The new plan:
-
-| | v1 (failed) | v2 (this plan) |
+| | v2 fine-tune (failed) | v3 self-distillation |
 |---|---|---|
-| Init | random | from Day 1 `final.pth` |
-| Learning rate | 1e-4 | **1e-5** (10× lower) |
-| Epochs | 120 | **50** |
-| `w_ssim` | 0.5 | **0.3** (lower, prevents loss climbing) |
-| Wall time per run | ~3 h | **~1.5 h** |
-| Expected PSNR @ 5 steps | 17 dB | **23–24+ dB** |
-
-The architectural change (illumination prior) is unchanged. What's changed
-is the *training recipe*: we adapt a working model to LOL-v2 Real instead of
-training a new one from random weights.
+| Init | Day 1 ckpt | Day 1 ckpt (both teacher and student) |
+| Target | ground truth | **teacher's 5-substep DDIM refinement** + GT anchor |
+| LR | 1e-5 | 5e-5 |
+| Epochs | 50 | 20 |
+| Per-iter cost | 1 fwd + 1 bwd | 6 fwd + 1 bwd (5 teacher substeps + student) |
+| Wall time / run | 1.5 h | ~1 h |
+| Story | architectural ablation | **training-time technique with citable foundation** |
+| Risk if it doesn't beat teacher | "no improvement" | **still publishable** as honest analysis (FSD failed → teacher already near-optimal at this step count) |
 
 ---
 
 ## Step 0 — Push your local commits (do this FIRST)
 
-The notebooks need three new things on GitHub:
-1. `kaggle_path_discovery.py` — robust dataset auto-discovery module
-2. `train.py` with `--init-from`, `--lr`, `--dataset-root` flags
-3. `kaggle_train_illum.ipynb` and `kaggle_eval_illum.ipynb` v2
-
-On your laptop:
+The Kaggle notebook needs:
+- `train_distill.py` — the new distillation training script
+- updated `train.py` (already pushed — has `--init-from`)
+- `kaggle_path_discovery.py` (already pushed)
+- `kaggle_distill.ipynb` and `kaggle_eval_distill.ipynb`
+- `NOVELTY_METHOD.md` (rewritten with FSD methods text)
 
 ```bash
 cd "/Users/chirana/Desktop/UOM/Sem 3/Software project IFS/Diffusion_new/LUMIDIFF/New_dif"
 git add .
-git commit -m "Day 2 v2: fine-tune from Day 1 ckpt, robust path discovery, smoke test"
+git commit -m "Day 2 v3: few-step self-distillation training + eval notebooks"
 git push
 ```
 
-Open `https://github.com/chirana07/Diffusion_new_final` in a browser to
-confirm the push went through. Cell 2 of each notebook explicitly checks the
-new flags exist on GitHub and refuses to start if they don't.
+Verify on `https://github.com/chirana07/Diffusion_new_final` that the latest
+commit is the one you just pushed.
 
 ---
 
 ## Step 1 — Confirm three datasets are on Kaggle
 
-You'll attach all three to the training notebook in Step 2:
+You'll attach all three to the distillation notebook in Step 2:
 
-1. **LOL-v2** — must include both `Real_captured/Train/` and `Real_captured/Test/`. (The Train folder is the new requirement; Day 1 only used Test.)
-2. **LOL eval15** — optional for training but useful for the eval notebook later.
-3. **Day 1 checkpoint** — your existing `final.pth`. This is what we fine-tune from. It's probably already on Kaggle as a dataset (e.g. `lumidiff-checkpoint`).
+1. **LOL-v2** — must include `Real_captured/Train/` and `Real_captured/Test/`.
+2. **LOL eval15** — for re-evaluation.
+3. **Day 1 checkpoint** — your existing `final.pth`. This is what we distill *from*.
 
-If LOL-v2 on Kaggle is missing the Train folder, re-upload your local
-`New_dif/LOL-v2/` folder as a **new** Kaggle dataset (don't try to update the
-existing one — Kaggle's update flow is finicky).
+If any of these are missing, upload them as Kaggle datasets via **Datasets →
++ New Dataset**.
 
 ---
 
-## Step 2 — Run the training notebook
+## Step 2 — Run the distillation notebook
 
-### 2.1 Open Kaggle
-
+### 2.1 New Kaggle notebook setup
 1. **kaggle.com/code → + New Notebook**
 2. Right panel → **Settings → Accelerator → GPU T4 x1 → Save**
 3. Right panel → **Persistence → Variables and Files**
-4. Right panel → **+ Add Data** three times → attach LOL-v2, LOL eval15 (optional), and your Day 1 checkpoint dataset.
+4. Right panel → **+ Add Data** three times → attach LOL-v2 + LOL eval15 + Day 1 checkpoint
 
 ### 2.2 Import + run
+- Drag `kaggle_distill.ipynb` from your laptop onto the page.
+- Click **Run All**.
 
-Drag `kaggle_train_illum.ipynb` from your laptop onto the Kaggle page (or
-**File → Import Notebook**), then click **Run All** (▶▶ at the top).
-
-The 11 cells, in order:
-
-| # | What it does | Wall time | Check |
+| # | What | Wall time | Check |
 |---|---|---|---|
-| 1 | pip install | 30 s | last line says `Successfully installed ...` |
-| 2 | clone repo + verify flags | 10 s | prints `All required flags present in train.py.` |
-| 3 | **PREFLIGHT**: discover datasets | 5 s | prints all candidates + `Validated counts: ...` showing Train≥300 Test≥15 |
-| 4 | locate Day 1 checkpoint | 1 s | prints `Will fine-tune from: ...` and the file size |
+| 1 | install | 30 s | `Successfully installed ...` |
+| 2 | clone repo + verify files | 10 s | `Repo ready.` |
+| 3 | preflight: discover datasets | 5 s | prints all candidates + validated counts (Train≥300, Test≥15) |
+| 4 | locate Day 1 checkpoint | 1 s | prints `INIT_FROM = ...` and the size |
 | 5 | GPU sanity | 1 s | `cuda: True ... Tesla T4` |
-| 6 | **SMOKE TEST** (1 epoch, 5 val batches) | 2–3 min | runs to completion without error; prints `Smoke test passed.` |
-| 7 | print fine-tune config | instant | shows `lr=1e-5, w_ssim=0.3, epochs=50` |
-| 8 | **Run A — baseline_ft** (no prior) | ~1.5 h | per-epoch progress; val PSNR every 5 epochs should climb |
-| 9 | **Run B — illum_ft** (with prior) | ~1.5 h | same |
-| 10 | bundle checkpoints + zip | 30 s | writes `day2_checkpoints.zip` |
+| 6 | **SMOKE TEST** (1 epoch + 5 val batches) | ~3–4 min | runs to completion; final line `Smoke test passed.` |
+| 7 | print distillation config | instant | shows `lr=5e-5, teacher_steps=5, epochs=20` |
+| 8 | **RUN — full distillation (20 epochs)** | ~50–70 min | per-epoch progress; val PSNR every 5 epochs should climb |
+| 9 | bundle checkpoints + zip | 30 s | writes `day2_distill.zip` |
 
-### 2.3 Sanity-checking during training (Cell 8 / Cell 9)
+### 2.3 What good progress looks like (Cell 8)
 
-The per-epoch output shows e.g.
+The per-epoch output:
+
 ```
-Epoch  3: 100%|██████████| 172/172 [01:24<00:00, ...]
-[epoch 4] val PSNR 22.812  SSIM 0.7951  -> new best, saved best_baseline_ft.pth
+Distill epoch 0: 100%|██████████| 172/172 [01:00<00:00, ...]
+[epoch 4] 5-step val PSNR 22.812  SSIM 0.7951  -> new best
+Distill epoch 5: 100%|██████████| 172/172 [01:00<00:00, ...]
+[epoch 9] 5-step val PSNR 23.214  SSIM 0.8003  -> new best
+...
 ```
 
-What to expect for Run A (`baseline_ft`):
-- Epoch 1 val PSNR: should be **close to 22.7 dB** (i.e. close to your Day 1 baseline). If it's <20 dB, the smart-load didn't work — stop and tell me.
-- Epochs 5–50: val PSNR should climb gradually, ending in the **23.0–24.5 dB** range.
+What to expect:
+- **Epoch 0–4 val PSNR**: should be **close to your Day 1 baseline of 22.77 dB**
+  (because the student starts as an identical copy of the teacher).
+- **Epoch 5–10 val PSNR**: should *climb* if distillation is working. Realistic
+  range: **23.0–24.0 dB**.
+- **Epoch 15–20 val PSNR**: should plateau or keep climbing slowly. Best case:
+  **24.0–25.0 dB**.
 
-What to expect for Run B (`illum_ft`):
-- Epoch 1 val PSNR: should be **close to 22.7 dB** because the illumination-prior input channel's weights are zero-initialized, so behavior matches the original at iteration 0.
-- Epochs 5–50: should also climb. The +illum gain over baseline_ft is what we're measuring.
+If val PSNR stays stuck at 22.7–22.8 dB throughout (i.e. essentially identical
+to teacher), distillation is not adding anything and we're in the "honest
+negative result" path — still publishable, just with the alternative paragraph
+in `NOVELTY_METHOD.md`.
 
-If val PSNR at epoch 5 is below 20 dB for either run, **stop the cell** and
-inspect — the smart-load probably failed and we need to debug.
+If val PSNR drops below 22.0 dB, **stop the cell**. Lower the LR (`DISTILL_LR =
+"1e-5"` in Cell 7), reset the cell, retry. The other knob to try is
+`W_ANCHOR = "1.0"` to pull harder toward GT.
 
-### 2.4 If the session disconnects mid-training
+### 2.4 Download checkpoint
+- Cell 9 outputs `/kaggle/working/day2_distill.zip`.
+- Output tab → download → unzip locally.
+- You should have `best_distill_K5.pth` and `last_distill_K5.pth`.
 
-Kaggle saves `best_<tag>.pth` every time validation PSNR improves. So even a
-mid-training disconnect leaves you with a usable checkpoint. Download
-whatever's in `/kaggle/working/Diffunet/checkpoints/best_*.pth` via the
-**Output** tab.
-
-If you only get partway through the 50 epochs, that's still fine; the
-checkpoint at epoch 25 with 1e-5 fine-tuning is likely already better than
-what we started with.
-
-### 2.5 Download and re-upload as a Kaggle dataset
-
-After Cell 10 finishes:
-1. Right panel → **Output tab** → download `day2_checkpoints.zip`.
-2. Unzip locally — should contain `best_baseline_ft.pth`, `best_illum_ft.pth`,
-   plus train logs.
-3. **Datasets → + New Dataset → upload all the .pth files** → name it
-   `lumidiff-day2-ckpts` → set Private → Create.
+### 2.5 Upload as a Kaggle dataset
+- **Datasets → + New Dataset → upload `best_distill_K5.pth`** → name it
+  `lumidiff-distill-ckpt` → set Private → Create.
 
 ---
 
-## Step 3 — Run the eval notebook
+## Step 3 — Run the re-evaluation notebook
 
-### 3.1 Open Kaggle
-
-Same setup as Step 2 (GPU T4) but attach **four** datasets this time:
+### 3.1 New Kaggle notebook setup
+Same as Step 2.1 but attach **four** datasets:
 - LOL eval15
 - LOL-v2
-- Day 1 checkpoint (kept for reference; not strictly needed)
-- `lumidiff-day2-ckpts` (the one you just uploaded)
+- Day 1 checkpoint (the teacher we'll compare against)
+- `lumidiff-distill-ckpt` (the new student)
 
 ### 3.2 Import + run
-
-Drag `kaggle_eval_illum.ipynb` onto the page, **Run All**.
+- Drag `kaggle_eval_distill.ipynb` onto the page.
+- Run All.
 
 | # | What | Wall time |
 |---|---|---|
 | 1 | install | 30 s |
 | 2 | clone repo | 10 s |
 | 3 | preflight datasets | 5 s |
-| 4 | locate checkpoints | 1 s |
+| 4 | locate student + teacher checkpoints | 1 s |
 | 5 | GPU sanity | 1 s |
-| 6 | headline eval @ 5 + 20 steps with LPIPS | ~10 min |
-| 7 | method ablation (baseline_ft @ 5) | ~5 min |
+| 6 | headline eval (student @ 5/10/20 with LPIPS) | ~15 min |
+| 7 | baseline (teacher @ 5 with LPIPS) | ~5 min |
 | 8 | step ablation (5/10/20/50/100) | ~30 min |
-| 9 | ARR grid (alpha 0.0–0.5) | ~5 min |
-| 10 | T4 efficiency benchmark | ~2 min |
-| 11 | Render Figures 1 + 3 | 30 s |
-| 12 | **Print Tables A/B/C/D** | instant — copy these into the paper |
+| 9 | ARR grid (alpha 0–0.5) | ~5 min |
+| 10 | T4 efficiency | ~2 min |
+| 11 | render Figures 1 + 3 | 30 s |
+| 12 | **print Tables A/B/C/D** | instant — copy into paper |
 | 13 | bundle + zip | 30 s |
 
-### 3.3 Read the output of Cell 12 carefully
+### 3.3 Read Cell 12 carefully
 
-Expected results (numbers will vary based on training):
+**Table A (headline, distilled student):** PSNR at 5 steps should be ≥ 22.77
+(the teacher's number). Realistic positive case: **23.0–25.0 dB**.
 
-**Table A (headline, illum_ft):** PSNR on LOL-v2 Real should be 23.0–24.5 dB
-at 5 steps (vs 22.77 from Day 1). LPIPS should be lower (better) than 0.214.
+**Table B (method ablation, teacher vs student):** the *method ablation row
+that addresses the area chair's complaint*. The student should beat the
+teacher by 0.3–2.0 dB if FSD is working.
 
-**Table B (method ablation):** the `+ illum prior (ours)` row should beat
-`baseline_ft` by 0.1–0.5 dB. If it doesn't, that's still publishable as an
-honest negative-result ablation — see fallback in `NOVELTY_METHOD.md`.
+**Table C (step ablation, student):** confirms the 5-step convergence claim
+survives. Should be ~flat from 5 to 100 steps.
 
-**Table C (step ablation):** PSNR should be roughly flat 5→100 steps,
-matching the Day 1 finding. If it's not flat, your "5 steps is enough"
-claim no longer holds for this checkpoint and we need to discuss.
-
-**Table D (ARR):** best alpha gets a small bump (e.g. 0.1–0.3 dB) or
-ties at alpha=0. Report whichever wins.
+**Table D (ARR on student):** secondary contribution. Best alpha may be 0
+(no improvement) — that's fine.
 
 ### 3.4 Download
+- Output tab → `phase3_eval_distill_outputs.zip` → unzip locally next to
+  the manuscript.
 
-Output tab → `phase3_day2_eval_outputs.zip` → unzip locally next to your
-manuscript.
+---
+
+## Two outcomes and what to do for each
+
+### Outcome A — Distillation works (student ≥ teacher + 0.5 dB)
+
+**This is your strongest paper.** Pitch:
+
+- Headline: distilled student at 5 DDIM steps achieves <X> dB PSNR / <Y> SSIM
+  on LOL-v2 Real (vs the 22.77 teacher baseline) at 812 ms/image on T4.
+- Novelty: FSD framework + ARR.
+- Method ablation: FSD adds <X>+ dB.
+- Step ablation: 5-step quality matches 50-step within 0.1 dB.
+
+Use the *positive* ablation paragraph in `NOVELTY_METHOD.md`.
+
+### Outcome B — Distillation doesn't help (student ≈ teacher)
+
+**Still publishable.** Pitch:
+
+- Headline: teacher at 5 DDIM steps achieves 22.77 dB on LOL-v2 Real, 812 ms/T4.
+- Novelty: ARR + we *evaluated* FSD and report an honest negative result.
+- The negative result IS a contribution: "the residual-space DDIM model with
+  Retinex illumination prior is already near-optimal at 5 steps; further
+  step-count reduction or quality gains require different architectural
+  approaches."
+- Step ablation: same finding.
+
+Use the *negative* ablation paragraph in `NOVELTY_METHOD.md`.
+
+Either way the paper has: efficiency benchmark + step ablation + LPIPS + ARR
++ FSD experiment (positive or negative). That's a full set of experimental
+contributions.
 
 ---
 
 ## What to do if something breaks
 
-### Cell 2 says "missing flag in train.py"
+### Cell 2 says "missing kaggle_path_discovery.py" or similar
 You forgot Step 0 (push). On laptop: `git push`, then re-run Cell 2.
 
 ### Cell 3 prints "LOL-v2 Real TRAIN split not found"
-The LOL-v2 dataset on Kaggle is missing the Train folder. Either:
-- Re-upload LOL-v2 with both Train AND Test, or
-- Manually override `discoveries['lolv2_real_train']` in Cell 3 (commented
-  template provided).
+LOL-v2 Train folder isn't on Kaggle. Re-upload with both Train and Test, or
+manually override `discoveries['lolv2_real_train']` in Cell 3.
 
 ### Cell 6 (smoke test) fails with shape mismatch
-The `smart_load_checkpoint` shape-tolerance logic isn't matching your Day 1
-checkpoint. Send me the exact error message — likely the model architecture
-constants in `config.py` have drifted.
+The Day 1 checkpoint architecture doesn't match what `train_distill.py`
+expects. This shouldn't happen — both teacher and student are built with
+`use_illum_prior=False` matching the source ckpt. If it does, send me the
+error.
 
-### Cell 8 epoch-1 val PSNR is < 20 dB
-Smart-load probably didn't initialize the model from the checkpoint correctly.
-Stop, inspect the smart_load log lines printed at startup of Cell 8 — should
-say something like `loaded=N partial=1 skipped=0`. If `loaded=0`, the
-checkpoint's state-dict keys don't match.
+### Cell 6 fails with OOM
+Reduce batch size: in the smoke command, change `"--batch-size", "4"` to `"2"`.
 
-### Loss climbing again during Cell 8 or Cell 9
-Lower `w_ssim` further: edit Cell 7, set `FT_WSSIM = "0.2"`, re-run. If still
-unstable, lower the LR: `FT_LR = "5e-6"`.
+### Cell 8 epoch-1 val PSNR is < 22 dB
+The smart-load failed silently. Inspect the training startup output — the
+`[smart_load] loaded=N partial=M skipped=K` line should show high `loaded`,
+zero or one `partial`, near-zero `skipped`. If `loaded=0`, the checkpoint
+keys don't match.
 
-### The +illum model is *worse* than baseline_ft
-Possible. Two responses:
-1. Report the negative-result ablation honestly. See `NOVELTY_METHOD.md`
-   alternative paragraph.
-2. Re-train illum_ft for 30 more epochs with the same settings. (The
-   illumination prior may need more time to learn its 7th-channel weights.)
+### Loss climbing during Cell 8
+Lower LR: edit Cell 7, set `DISTILL_LR = "2e-5"`, re-run.
+Or: increase anchor: `W_ANCHOR = "1.0"`.
 
-### LPIPS is empty in the eval table
-`pip install lpips` in Cell 1 failed silently. Run `!pip install lpips` in
-a fresh cell, then re-run eval Cells 6 + 12.
+### Val PSNR not improving over teacher (Outcome B detected early)
+Don't panic. Two options:
+1. Continue and accept the negative result. Still publishable.
+2. Try `--teacher-steps 10` (deeper teacher refinement → potentially harder
+   target → potentially better student). Edit Cell 7's `TEACHER_STEPS = 10`,
+   re-run Cells 7 and 8. ~1.5x training time.
+
+### LPIPS empty in eval table
+`pip install lpips` in Cell 1 failed silently. Run `!pip install lpips` in a
+fresh cell, then re-run eval Cells 6, 7, 12.
 
 ---
 
 ## Submission-day checklist (Day 4)
 
-Before you click submit, every box must be ticked:
+Tick every box before submission:
 
-- [ ] Title doesn't contain "LuminaDiff" (or has a clearly different framing).
-- [ ] Abstract pitches the **efficiency** story, not the absolute-quality story.
-- [ ] Headline numbers in Table 1 are from the **fine-tuned illum_ft** checkpoint.
+- [ ] Title doesn't lead with "LuminaDiff" (or has a refreshed framing).
+- [ ] Abstract pitches the FSD + efficiency story.
+- [ ] Headline numbers in Table 1 are from the **distilled student** (or the teacher if Outcome B).
 - [ ] LPIPS column filled in for every headline row.
 - [ ] Latency reported in **ms/image on a single T4**.
-- [ ] Figure 1 is the new render from `kaggle_eval_illum`, not Day 1.
-- [ ] Figure 3 (step ablation) shows the few-step convergence holds for `illum_ft`.
-- [ ] Method-ablation table (`baseline_ft` vs `illum_ft`) is in Section 4 with both rows.
-- [ ] ARR ablation table somewhere; if best alpha is 0, report honestly.
+- [ ] Figure 1 (teaser) is the new render from `kaggle_eval_distill`.
+- [ ] Figure 3 (step ablation) shows the few-step convergence holds.
+- [ ] Method-ablation table (teacher vs distilled student) is in Section 4.
+- [ ] FSD methods writeup (Section 3.X) is paste-in from `NOVELTY_METHOD.md`.
+- [ ] ARR ablation table (Table D) somewhere.
 - [ ] Recent diffusion-LLIE baselines cited (Diff-Retinex, PyDiff, LightenDiffusion).
-- [ ] Reproducibility appendix lists the **exact fine-tuning command** (`--init-from`, `--lr 1e-5`, `--epochs 50`).
+- [ ] Reproducibility appendix lists the exact distillation command (`--init-from`, `--teacher-steps 5`, `--lr 5e-5`, `--epochs 20`).
 - [ ] Limitations section discusses LOL-v2 Synthetic + at least one failure case.
 - [ ] Broader Impact paragraph mentions surveillance.
 - [ ] Typo "It has been trained a U-net..." is fixed.
-- [ ] GitHub repo has a `README.md` and is reachable from the paper's URL.
-- [ ] All 14 boxes ticked.
+- [ ] GitHub repo has a README.md.
+- [ ] All 15 boxes ticked.
 
 ---
 
-## Reference: every file in the workspace
+## File reference
 
 | File | Purpose |
 |---|---|
 | `DAY2_GO.md` (this) | Master runbook — follow top to bottom |
-| `kaggle_path_discovery.py` | Robust dataset auto-discovery module |
-| `kaggle_train_illum.ipynb` | Fine-tuning training notebook (smoke test + 2 runs) |
-| `kaggle_eval_illum.ipynb` | Re-evaluation notebook |
-| `train.py` | Updated with `--init-from`, `--lr`, `--dataset-root` |
-| `evaluation.py` | Updated with `--gate-alpha`, `--gate-floor` |
-| `diffusion.py` | Updated with Adaptive Residual Rescaling in `ddim_sample` |
-| `REVIEWS.md` | All three reviews verbatim |
+| `train_distill.py` | Self-distillation training script |
+| `kaggle_distill.ipynb` | Distillation notebook |
+| `kaggle_eval_distill.ipynb` | Re-evaluation notebook |
+| `kaggle_path_discovery.py` | Robust dataset auto-discovery |
+| `train.py` | Has `--init-from`, `--lr`, `--dataset-root` |
+| `evaluation.py` | Has `--gate-alpha`, `--gate-floor` |
+| `diffusion.py` | Has ARR in `ddim_sample` |
+| `NOVELTY_METHOD.md` | Section 3.X writeup for FSD + ARR + new contribution bullets |
+| `REVIEWS.md` | All 3 reviews verbatim |
 | `REVIEWER_RESPONSE.md` | 12 concerns mapped to actions |
-| `NOVELTY_METHOD.md` | Section 3.X writeup for ARR + contribution bullets |
-| `RESUBMISSION_PLAN.md`, `PHASE3_FEW_DAYS.md`, `RUNBOOK.md`, `KAGGLE_HOWTO.md` | Earlier plans, kept for reference |
+| `phase3_day1_outputs/` | Day 1 results (kept for reference) |

@@ -1,0 +1,2 @@
+split,n,psnr_mean,psnr_std,ssim_mean,ssim_std,lpips_mean,runtime_mean,inference_steps,sampler
+eval15,15,18.473852835836112,3.4354545808821406,0.7480514172151039,0.06752086875953935,,1.3256174564361571,5,ddim

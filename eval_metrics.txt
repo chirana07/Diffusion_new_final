@@ -1,10 +1,5 @@
-[eval15] n=15 steps=100 sampler=ddim
-  PSNR:  18.4879 (std 3.4122)
-  SSIM:  0.7537 (std 0.0749)
-  Runtime/image: 37.4762s
-
-[lolv2_real] n=100 steps=100 sampler=ddim
-  PSNR:  22.6211 (std 3.7833)
-  SSIM:  0.7900 (std 0.0687)
-  Runtime/image: 33.0117s
+[eval15] n=15 steps=5 sampler=dpm_posterior
+  PSNR:  16.1355 (std 4.5009)
+  SSIM:  0.6732 (std 0.0818)
+  Runtime/image: 1.3168s
 
