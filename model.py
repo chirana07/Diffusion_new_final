@@ -9,36 +9,15 @@ from modules import (
     Downsample,
     AttentionBlock,
     ConditionEncoder,
-    IlluminationPrior,
     ResBlockSFT,
     get_timestep_embedding,
 )
 
 
 class ResidualConditionedUNet(nn.Module):
-    """
-    Residual-conditioned U-Net denoiser.
-
-    Keep `use_illum_prior=False` for backward compatibility with the existing
-    trained checkpoint. Setting it to True enables the Retinex illumination
-    prior: an extra 1-channel input fed to the condition encoder (and concatenated
-    with the low-light image at the first head conv).
-
-    When `use_illum_prior=True`:
-      - head input channels: 3 (residual/noise) + 3 (low-light) + 1 (illum) = 7
-      - cond encoder input channels: 4 (RGB + illum)
-
-    This changes input-facing conv weights, so a checkpoint trained without the
-    prior CANNOT be reused directly. Retrain for LuminaDiff-R.
-    """
-
-    def __init__(self, use_illum_prior=None):
+    def __init__(self):
         super().__init__()
         self.conf = Config()
-
-        if use_illum_prior is None:
-            use_illum_prior = bool(getattr(self.conf, "USE_ILLUM_PRIOR", False))
-        self.use_illum_prior = use_illum_prior
 
         ch = self.conf.CHANNELS
         ch_mult = self.conf.CHANNEL_MULT
@@ -50,15 +29,10 @@ class ResidualConditionedUNet(nn.Module):
             nn.Linear(time_dim, time_dim),
         )
 
-        head_in = 7 if self.use_illum_prior else 6
-        cond_in = 4 if self.use_illum_prior else 3
-
-        self.head = nn.Conv2d(head_in, ch, 3, padding=1)
-
-        self.illum_prior = IlluminationPrior() if self.use_illum_prior else None
+        self.head = nn.Conv2d(6, ch, 3, padding=1)
 
         self.cond_encoder = ConditionEncoder(
-            in_ch=cond_in,
+            in_ch=3,
             base_ch=ch,
             ch_mult=tuple(ch_mult),
         )
@@ -117,16 +91,9 @@ class ResidualConditionedUNet(nn.Module):
 
     def forward(self, x, t, low_light, return_residual=False):
         t_emb = self.time_mlp(get_timestep_embedding(t, self.conf.CHANNELS))
+        cond_feats = self.cond_encoder(low_light)
 
-        if self.use_illum_prior:
-            illum = self.illum_prior(low_light)          # (B, 1, H, W) in [-1, 1]
-            cond_in = torch.cat([low_light, illum], 1)   # (B, 4, H, W)
-            cond_feats = self.cond_encoder(cond_in)
-            x_in = torch.cat([x, low_light, illum], 1)   # (B, 7, H, W)
-        else:
-            cond_feats = self.cond_encoder(low_light)
-            x_in = torch.cat([x, low_light], 1)          # (B, 6, H, W)
-
+        x_in = torch.cat([x, low_light], dim=1)
         h = self.head(x_in)
 
         skips = [h]
