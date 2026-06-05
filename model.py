@@ -15,7 +15,7 @@ from modules import (
 
 
 class ResidualConditionedUNet(nn.Module):
-    def __init__(self):
+    def __init__(self, use_illum_prior=False):
         super().__init__()
         self.conf = Config()
 
